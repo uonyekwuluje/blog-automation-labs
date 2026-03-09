@@ -1,0 +1,287 @@
+# Install Ansible
+============================================
+sudo apt update && sudo apt upgrade -y
+sudo apt-get install -y jq net-tools ntp ntpdate net-tools gnupg2 zip make curl \
+ca-certificates software-properties-common libseccomp2 apt-transport-https unzip \
+python3-dev python3-pip 
+
+
+# Python Pip Fix
+===========================================
+sudo rm -rf /usr/lib/python3.12/EXTERNALLY-MANAGED
+
+# Create Jenkins User
+==========================================
+sudo useradd -m -s /bin/bash jenkins
+sudo usermod -aG sudo jenkins
+
+sudo vim /etc/sudoers
+>>
+jenkins ALL=(ALL) NOPASSWD:ALL
+
+sudo visudo -cf /etc/sudoers
+>>
+/etc/sudoers: parsed OK
+/etc/sudoers.d/90-cloud-init-users: parsed OK
+/etc/sudoers.d/README: parsed OK
+
+
+
+# Install AWSCLI
+===========================================
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+sudo ./aws/install
+rm awscliv2.zip
+
+aws --version
+>>
+aws-cli/2.34.0 Python/3.13.11 Linux/6.17.0-1007-aws exe/x86_64.ubuntu.24
+
+
+# Configure AWS CLI
+==========================================
+aws configure
+>>
+AWS Access Key ID [None]: 
+AWS Secret Access Key [None]: 
+Default region name [None]: us-east-1
+Default output format [None]: json
+
+
+# Install Boto3 & Requirements
+============================================
+sudo pip3 install pylint PyYAML jinja2 paramiko boto3 botocore ansible
+sudo pip3 install pyvbox pylint PyYAML jinja2 paramiko boto3 awscli aws_ec2 django --upgrade
+sudo ansible-galaxy collection install amazon.aws --force
+
+# Create Ansible Structure
+============================================
+mkdir ansible && cd ansible && mkdir {roles,group_vars,files,templates}
+
+vim ansible.cfg 
+>>
+[defaults]
+ansible_ssh_user = ubuntu
+#ansible_ssh_private_key_file: ~/.ssh/ucheaws-dev-key.pem
+private_key_file: ~/.ssh/infracidlabs-key.pem
+inventory  = ./aws_ec2.yaml
+roles_path = ./roles
+pipelining = True
+become     = True
+gathering  = smart
+host_key_checking    = False
+deprecation_warnings = False
+command_warnings     = False
+interpreter_python = auto_silent
+
+[ssh_connection]
+retries = 3
+pipelining = True
+scp_if_ssh = True
+#ssh_args = -o ControlMaster=auto -o ControlPersist=600s -F ssh-config
+
+[inventory]
+enable_plugins = aws_ec2, script, yaml
+
+
+
+vim aws_ec2.yaml
+>>
+---
+plugin: aws_ec2
+
+regions:
+  - us-east-1
+
+filters:
+  instance-state-name:
+    - running
+groups:
+  dev_instances: "tags.Environment == 'dev1'"
+  stg_instances: "tags.Environment == 'stg1'"
+  non_dev_instances: "tags.Environment != 'dev1'"
+  infra_ami_hosts: "tags.ami_type == 'infra_ami'"
+  paz_ami_hosts: "tags.ami_type == 'paz_ami'"
+    
+  ##############
+  # Mongo groups
+  ##############
+  mongo: "inventory_hostname is search('mongo')"
+  mongopipe: "inventory_hostname is search('mongopipe')"
+  mongoui: "inventory_hostname is search('mongoui')"
+
+  # Everything running mongo, server or client (except Jenkins,
+  # which has a completely different setup!)
+  mongo_hosts: "tags.type in ['merchant-api', 'pipeline'] or inventory_hostname is search('mongo')"
+  # All-inclusive list of pipeline-related hosts with MongoDB installed. (Used for Cloud Mgr. agents.)
+  mongopipe_hosts: "tags.type in ['merchant-api', 'pipeline'] or inventory_hostname is search('mongopipe')"
+  # All the Mongo hosts which use LVM
+  mongo_lvm_hosts: "tags.type in ['mongopipe-dbrs', 'mongoui-dbrs'] and tags.rs_type != 'arbiter' and tags.shard_zone is not defined"
+  # All the Mongo hosts which store data in the /data directory
+  mongo_data_hosts: "tags.type in ['mongopipe-dbrs', 'mongopipe-cfrs', 'mongoui-dbrs'] and tags.rs_type != 'arbiter'"
+  mongo_data_non_config_hosts: "tags.type in ['mongopipe-dbrs', 'mongoui-dbrs'] and tags.rs_type != 'arbiter'"
+  mongo_router_hosts: "tags.type in ['merchant-api', 'pipeline', 'mongopipe-router']"
+
+  # Shard groups
+  mongo_shard_hosts: "tags.type in ['mongopipe-dbrs', 'mongoui-dbrs'] and tags.shard_zone is defined"
+
+  mongopipe_shard_hosts: "tags.type == 'mongopipe-dbrs' and tags.shard_zone is defined"
+  mongoui_shard_hosts: "tags.type == 'mongoui-dbrs' and tags.shard_zone is defined"
+
+  mongo_non_partition_shard_hosts: "tags.type in ['mongopipe-dbrs', 'mongopipe-cfrs', 'mongoui-dbrs'] and tags.shard_zone is not defined"
+  mongopipe_non_partition_shard_hosts: "tags.type == 'mongopipe-dbrs' and tags.shard_zone is not defined"
+  mongoui_non_partition_shard_hosts: "tags.type == 'mongoui-dbrs' and tags.shard_zone is not defined"
+  # Database primaries are now determined dynamically, not via an Ansible group
+
+
+keyed_groups:
+  - key: tags.environment
+    separator: ''
+  - key: tags.type
+    separator: ''
+  - key: tags.config_status
+    prefix: 'config_status'
+  - key: tags.tier_type
+    prefix: 'tier_type'
+  - key: tags
+    prefix: tag
+  - key: tags.Name
+    prefix: tag_Name    
+  - prefix: instance_type
+    key: instance_type
+  - key: placement.region
+    prefix: aws_region
+  - key: placement.availability_zone
+    prefix: 'az'
+  - key: tags.rs_type
+    prefix: 'rs_type'
+  - key: tags.rs_status
+    prefix: 'rs_status'
+  - key: tags.rs_number
+    prefix: 'rs_number'
+  - key: tags.rs_name
+    prefix: 'rs_name'
+  - key: tags.shard_zone
+    prefix: 'mongo_shard'
+  - key: tags.paz_ubuntu_version
+    prefix: 'paz_ubuntu'
+  - key: tags.pazien_release
+    prefix: 'pazien_release'
+  - key: tags.pipeline_type
+    prefix: 'pipeline_type'
+  - key: tags.pipeline_role
+    prefix: 'pipeline_role'
+
+hostnames:
+  - tag:Name
+  - private-ip-address
+  - dns-name
+  - ip-address
+
+compose:
+  ansible_host: tags.Name
+  infra_environment: tags.environment
+  service: tags.type 
+
+
+
+
+
+
+
+List All Resource
+```
+ansible-inventory --list
+```
+
+Test Garph
+```
+ansible-inventory --graph
+```
+
+Ping Test
+```
+ansible all -m ping --user ubuntu
+ansible all -m ping --user ubuntu --private-key ~/.ssh/ucheaws-dev-key.pem
+```
+
+
+
+
+
+
+
+
+====================================
+# Create New User and SSH Key      #
+====================================
+# Create Jenkins User
+------------------------------------
+sudo useradd -m -s /bin/bash jenkins
+sudo usermod -aG sudo jenkins
+
+sudo vim /etc/sudoers
+>>
+jenkins ALL=(ALL) NOPASSWD:ALL
+
+sudo visudo -cf /etc/sudoers
+>>
+
+ssh-keygen -t ed25519 -C "" -N ""    # New Format
+ssh-keygen -t rsa -N "" -C ""        # Old Format
+>>
+drwx------ 2 jenkins jenkins 4096 Mar  4 10:03 .ssh
+
+-rw------- 1 jenkins jenkins 2602 Mar  4 10:03 id_rsa
+-rw-r--r-- 1 jenkins jenkins  570 Mar  4 10:03 id_rsa.pub
+
+jenkins@buildsvr:~$ cat .ssh/id_rsa
+>>
+
+jenkins@buildsvr:~$ cat .ssh/id_rsa.pub 
+>>
+
+
+# Create Keys
+---------------------------
+aws secretsmanager create-secret --name jenkins_user_sshkey/private_key --secret-string file://id_rsa
+aws secretsmanager create-secret --name jenkins_user_sshkey/public_key --secret-string file://id_rsa.pub
+
+# Delete Keys
+---------------------------
+aws secretsmanager list-secrets
+aws secretsmanager delete-secret --secret-id "jenkins_user_sshkey/private_key" --force-delete-without-recovery
+aws secretsmanager delete-secret --secret-id "jenkins_user_sshkey/public_key" --force-delete-without-recovery
+
+
+
+
+-----------------------
+# Remote Config       #
+-----------------------
+# Create Jenkins User
+------------------------------------
+sudo useradd -m -s /bin/bash jenkins
+sudo usermod -aG sudo jenkins
+
+-rw------- 1 ubuntu ubuntu  398 Mar  4 09:41 authorized_keys
+
+sudo su - jenkins
+mkdir .ssh
+chmod 0700 .ssh
+
+vim .ssh/authorized_keys
+>>
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC/XVb/KrF/Bu6JcQGCPz91UNno9H2nD
+
+chmod 0600 ~/.ssh/authorized_keys
+
+# Test From Server
+---------------------------------
+sudo su - jenkins
+ssh 10.40.2.182
+
+
+
+
